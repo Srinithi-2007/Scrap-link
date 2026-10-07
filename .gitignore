@@ -1,0 +1,26 @@
+# Environment variables and secrets
+.env
+*.env
+.env.*
+
+# Build outputs
+target/
+build/
+dist/
+*.jar
+*.war
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.project
+.classpath
+.settings/
+
+# OS and Node
+.DS_Store
+Thumbs.db
+node_modules/
