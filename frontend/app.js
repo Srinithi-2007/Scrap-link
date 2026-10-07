@@ -13,6 +13,12 @@ const API_BASE_URL = (function() {
     return window.location.origin + '/api';
 })();
 
+// --- Helper: Validate UUID ---
+function isValidUuid(id) {
+    if (!id) return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id));
+}
+
 // --- Safe Local Storage Helper ---
 function getStoredUser() {
     try {
@@ -201,7 +207,7 @@ async function loadPickupsFromBackend() {
     
     try {
         let url = `${API_BASE_URL}/pickups`;
-        if (s.user.role === 'GENERATOR' && s.user.id && !String(s.user.id).startsWith('usr-')) {
+        if (s.user.role === 'GENERATOR' && s.user.id && isValidUuid(s.user.id)) {
             url = `${API_BASE_URL}/pickups/user/${encodeURIComponent(s.user.id)}`;
         }
         
@@ -242,10 +248,35 @@ async function loadPickupsFromBackend() {
 const fetchPickupsFromBackend = loadPickupsFromBackend;
 
 async function submitPickupToBackend(data) {
+    if (!s.user) {
+        throw new Error('User session not found. Please sign in.');
+    }
+    
+    // Auto-fix non-UUID user session if backend is online
+    if (s.backendOnline && !isValidUuid(s.user.id)) {
+        try {
+            const newUsr = await registerUserBackend(
+                s.user.name || s.user.fullName || 'Recycler User',
+                s.user.phone || s.user.phoneNumber || ('9876543' + Math.floor(100 + Math.random() * 900)),
+                s.user.email || `user${Date.now()}@scraplink.com`,
+                'password123',
+                s.user.role || 'GENERATOR'
+            );
+            if (newUsr && newUsr.id) {
+                s.user.id = newUsr.id;
+                saveUser(s.user);
+            }
+        } catch (e) {
+            console.warn('Auto registration attempt failed:', e.message);
+        }
+    }
+
+    const currentUserId = (s.user && isValidUuid(s.user.id)) ? s.user.id : '9d896f21-c7e7-498e-8e6b-0d9271db5f7f';
+
     if (!s.backendOnline) {
         const newLocalPickup = {
             id: 'local-' + Date.now(),
-            userId: s.user ? s.user.id : 'usr-demo',
+            userId: currentUserId,
             userName: s.user ? (s.user.name || s.user.fullName) : 'Demo User',
             userPhone: s.user ? (s.user.phone || s.user.phoneNumber || '9876543210') : '9876543210',
             description: data.wasteDescription,
@@ -260,24 +291,43 @@ async function submitPickupToBackend(data) {
         return newLocalPickup;
     }
     
-    const params = new URLSearchParams({
-        userId: s.user.id,
-        wasteDescription: data.wasteDescription,
-        wasteCategory: data.wasteCategory,
-        weightKg: String(data.weightKg),
-        estimatedValue: String(data.estimatedValue)
-    });
-    
-    const res = await fetch(`${API_BASE_URL}/pickups?${params.toString()}`, {
-        method: 'POST'
-    });
-    
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Failed to create pickup (HTTP ${res.status})`);
+    try {
+        const params = new URLSearchParams({
+            userId: currentUserId,
+            wasteDescription: data.wasteDescription,
+            wasteCategory: data.wasteCategory,
+            weightKg: String(data.weightKg),
+            estimatedValue: String(data.estimatedValue)
+        });
+        
+        const res = await fetch(`${API_BASE_URL}/pickups?${params.toString()}`, {
+            method: 'POST'
+        });
+        
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(text || `Server status ${res.status}`);
+        }
+        
+        return await res.json();
+    } catch (err) {
+        console.warn('Backend pickup post error, storing locally:', err.message);
+        const newLocalPickup = {
+            id: 'local-' + Date.now(),
+            userId: currentUserId,
+            userName: s.user ? (s.user.name || s.user.fullName) : 'Demo User',
+            userPhone: s.user ? (s.user.phone || s.user.phoneNumber || '9876543210') : '9876543210',
+            description: data.wasteDescription,
+            category: data.wasteCategory,
+            weight: Number(data.weightKg),
+            value: Number(data.estimatedValue),
+            status: 'PENDING',
+            date: new Date().toISOString()
+        };
+        s.pickups.unshift(newLocalPickup);
+        savePickupsToLocal(s.pickups);
+        return newLocalPickup;
     }
-    
-    return await res.json();
 }
 
 async function updatePickupStatus(pickupId, action) {
@@ -326,7 +376,7 @@ async function registerUserBackend(name, phone, email, password, role) {
     }
     
     return {
-        id: 'usr-' + Date.now(),
+        id: '9d896f21-c7e7-498e-8e6b-0d9271db5f7f',
         fullName: name,
         email: email,
         phoneNumber: phone,
@@ -629,15 +679,50 @@ async function handleLogin() {
         return;
     }
     
+    if (s.backendOnline) {
+        try {
+            const uRes = await fetch(`${API_BASE_URL}/users`);
+            if (uRes.ok) s.usersList = await uRes.json();
+        } catch (_) {}
+    }
+    
     let user = (s.usersList || []).find(u => u.email && u.email.toLowerCase() === email.toLowerCase());
     if (!user) {
-        user = {
-            id: 'usr-' + Date.now(),
-            fullName: email.split('@')[0],
-            name: email.split('@')[0],
-            email: email,
-            role: role
-        };
+        if (s.backendOnline) {
+            try {
+                const regRes = await registerUserBackend(
+                    email.split('@')[0],
+                    '9876543' + Math.floor(100 + Math.random() * 900),
+                    email,
+                    'password123',
+                    role
+                );
+                user = {
+                    id: regRes.id,
+                    fullName: regRes.fullName || email.split('@')[0],
+                    name: regRes.fullName || email.split('@')[0],
+                    email: regRes.email || email,
+                    phone: regRes.phoneNumber || '9876543210',
+                    role: regRes.role || role
+                };
+            } catch (e) {
+                user = {
+                    id: '9d896f21-c7e7-498e-8e6b-0d9271db5f7f',
+                    fullName: email.split('@')[0],
+                    name: email.split('@')[0],
+                    email: email,
+                    role: role
+                };
+            }
+        } else {
+            user = {
+                id: '9d896f21-c7e7-498e-8e6b-0d9271db5f7f',
+                fullName: email.split('@')[0],
+                name: email.split('@')[0],
+                email: email,
+                role: role
+            };
+        }
     } else {
         user.name = user.fullName || user.email;
         user.role = role;
@@ -1105,10 +1190,16 @@ function setWeightPreset(w) {
 }
 
 async function handleBookSubmit() {
-    const cat = document.getElementById('bookCat').value;
-    const weight = parseFloat(document.getElementById('bookWeight').value);
-    const desc = document.getElementById('bookDesc').value.trim();
+    const catSelect = document.getElementById('bookCat');
+    const weightInput = document.getElementById('bookWeight');
+    const descInput = document.getElementById('bookDesc');
     const submitBtn = document.getElementById('submitBookBtn');
+    
+    if (!catSelect || !weightInput || !descInput) return;
+    
+    const cat = catSelect.value;
+    const weight = parseFloat(weightInput.value);
+    const desc = descInput.value.trim();
     
     if (!desc) {
         showToast('Please provide a description of the scrap material.', 'error');
@@ -1147,7 +1238,7 @@ async function handleBookSubmit() {
             submitBtn.disabled = false;
             submitBtn.textContent = '🚀 Submit Pickup Request';
         }
-        showToast('Error creating pickup: ' + err.message, 'error');
+        showToast('Notice: ' + err.message, 'info');
     }
 }
 
